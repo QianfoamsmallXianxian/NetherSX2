@@ -965,6 +965,8 @@ static int chip_id_to_adreno(unsigned int chip_id) {
 /* ------------------------------------------------------------------ */
 
 int g_disable_fbfetch = 0;
+static int g_force_disable_problem_extensions = 1;
+static int g_is_adreno840 = 0;
 
 void public_resolve_linker_symbols();
 
@@ -976,6 +978,16 @@ void shim_init(void) {
 
     char value[PROP_VALUE_MAX] = {0};
 	int adreno_model = get_adreno_model(value);
+
+    if (adreno_model == 840) {
+        g_is_adreno840 = 1;
+        setenv("TU_DEBUG", "noubwc,nolrz,flushall", 1);
+        g_disable_fbfetch = 1;
+        setenv("FD_DEV_FEATURES", "enable_tp_ubwc_flag_hint=1", 1);
+        setenv("MESA_VK_WSI_PRESENT_MODE", "immediate", 1);
+        setenv("MESA_VK_MAX_FPS", "60", 1);
+        LOGI("VulkanShim: Adreno 840 compatibility flags enabled");
+    }
 		
 	//setup_turnip_env(1, 1, 1);
 	// No TU_DEBUG flags needed — readback barrier hook ensures UBWC
@@ -1047,6 +1059,10 @@ void shim_init(void) {
 					}
 					else
 					{						
+                    if (adreno_model == 840) {
+                        snprintf(g_turnip_path, sizeof(g_turnip_path), "%slibvulkan_freedreno_a8xx-turnip-gen8-V31.so", g_lib_dir);
+                        LOGI("VulkanShim: Using Adreno 840 specific driver");
+                    } else 
 						if (adreno_model == 825) 
 						{ 	// Snapdragon 8s Gen 4 ?
 							g_disable_fbfetch = 1;
@@ -1384,7 +1400,7 @@ static VkResult hooked_EnumDeviceExtProps(void *physDev, const char *pLayer,
                                            uint32_t *pCount, void *pProps) {
     VkResult r = real_EnumDeviceExtProps(physDev, pLayer, pCount, pProps);
     
-    if (r == 0 && pProps && pCount && g_disable_fbfetch) {
+    if (r == 0 && pProps && pCount && (g_disable_fbfetch || g_force_disable_problem_extensions)) {
         /* Filter out the problematic extension */
         uint32_t write = 0;
         for (uint32_t i = 0; i < *pCount; i++) {
@@ -1422,7 +1438,7 @@ extern "C" PFN_vkVoidFunction vkGetInstanceProcAddr(VkInstance inst, const char 
     PFN_vkVoidFunction fn = real_gipa(inst, name);
 
     if (name) {
-		/*
+		
         if (strcmp(name, "vkCmdPipelineBarrier") == 0 && fn) {
             g_vkCmdPipelineBarrier = (PFN_vkCmdPipelineBarrier)fn;
             LOGI("VulkanShim: captured vkCmdPipelineBarrier (via GIPA) = %p", fn);
@@ -1440,7 +1456,7 @@ extern "C" PFN_vkVoidFunction vkGetInstanceProcAddr(VkInstance inst, const char 
             LOGI("VulkanShim: intercepting vkCmdCopyImageToBuffer2KHR (via GIPA) = %p", fn);
             return (PFN_vkVoidFunction)hooked_CmdCopyImageToBuffer2;
         }
-		*/
+		
 		
 		if (strcmp(name, "vkGetPhysicalDeviceProperties") == 0 && fn) {
 			real_GetPhysicalDeviceProperties = (void (*)(void*, void*))fn;
@@ -1522,7 +1538,6 @@ extern "C" PFN_vkVoidFunction vkGetDeviceProcAddr(VkDevice dev, const char *name
     PFN_vkVoidFunction fn = real_gdpa(dev, name);
 
     if (name) {
-		/*
         // Capture vkCmdPipelineBarrier when first resolved 
         if (strcmp(name, "vkCmdPipelineBarrier") == 0) {
             g_vkCmdPipelineBarrier = (PFN_vkCmdPipelineBarrier)fn;
@@ -1549,7 +1564,7 @@ extern "C" PFN_vkVoidFunction vkGetDeviceProcAddr(VkDevice dev, const char *name
             g_real_copy_itb_v1 = (PFN_vkCmdCopyImageToBuffer)fn;
             LOGI("VulkanShim: intercepting vkCmdCopyImageToBuffer (v1) = %p", fn);
             return (PFN_vkVoidFunction)hooked_CmdCopyImageToBuffer_v1;
-        }*/
+        }
 		
 		if (name && strcmp(name, "vkEnumeratePhysicalDevices") == 0) {
 			return (PFN_vkVoidFunction)hooked_EnumeratePhysicalDevices;
