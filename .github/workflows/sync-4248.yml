@@ -1,0 +1,65 @@
+name: Sync NetherSX2 4248 APK
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync-4248:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Get latest upstream release
+        id: upstream
+        run: |
+          RELEASE_JSON=$(curl -sS \
+            https://api.github.com/repos/nckstwrt/NetherSX2-Turnip/releases/latest)
+
+          TAG=$(echo "$RELEASE_JSON" | jq -r '.tag_name')
+          URL=$(echo "$RELEASE_JSON" | jq -r \
+            '.assets[] | select(.name | test("4248.*\\.apk$")) | .browser_download_url' \
+            | head -n 1)
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+      - name: Skip if no 4248 asset found
+        if: steps.upstream.outputs.url == ''
+        run: |
+          echo "No 4248 APK found in latest release"
+          exit 0
+
+      - name: Download 4248 APK
+        run: |
+          curl -sS -L \
+            -o "NetherSX2-4248.apk" \
+            "${{ steps.upstream.outputs.url }}"
+
+      - name: Upload as build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NetherSX2-4248-${{ steps.upstream.outputs.tag }}
+          path: NetherSX2-4248.apk
+
+      - name: Publish release if new
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.upstream.outputs.tag }}"
+          RELEASE_TAG="upstream-$TAG"
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists, skipping."
+            exit 0
+          fi
+
+          gh release create "$RELEASE_TAG" \
+            "NetherSX2-4248.apk" \
+            --title "NetherSX2 4248 - $TAG" \
+            --generate-notes
