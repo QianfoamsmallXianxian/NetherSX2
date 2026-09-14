@@ -18,8 +18,11 @@ jobs:
       - name: Get latest upstream release
         id: upstream
         run: |
-          RELEASE_JSON=$(curl -sS \
-            https://api.github.com/repos/nckstwrt/NetherSX2-Turnip/releases/latest)
+          RELEASE_JSON=$(curl -fsS --retry 3 --retry-connrefused \
+            https://api.github.com/repos/nckstwrt/NetherSX2-Turnip/releases/latest) || {
+            echo "Failed to fetch upstream release metadata"
+            exit 0
+          }
 
           TAG=$(echo "$RELEASE_JSON" | jq -r '.tag_name')
           URL=$(echo "$RELEASE_JSON" | jq -r \
@@ -37,9 +40,28 @@ jobs:
 
       - name: Download 4248 APK
         run: |
-          curl -sS -L \
+          curl -fsS -L --retry 3 --retry-connrefused \
             -o "NetherSX2-4248.apk" \
             "${{ steps.upstream.outputs.url }}"
+
+      - name: Verify downloaded APK
+        run: |
+          # A valid APK is a ZIP archive; reject HTML error pages / truncated files
+          if [ ! -s NetherSX2-4248.apk ]; then
+            echo "Downloaded file is empty" >&2
+            exit 1
+          fi
+          if ! head -c 4 NetherSX2-4248.apk | grep -q $'PK\x03\x04'; then
+            echo "Downloaded file is not a ZIP/APK (got: $(head -c 16 NetherSX2-4248.apk | xxd -p))" >&2
+            exit 1
+          fi
+          APK_SIZE=$(stat -c%s NetherSX2-4248.apk)
+          echo "APK size: $APK_SIZE bytes"
+          echo "sha256: $(sha256sum NetherSX2-4248.apk | cut -d' ' -f1)"
+          if [ "$APK_SIZE" -lt 10485760 ]; then
+            echo "APK suspiciously small (<10MB), refusing to publish" >&2
+            exit 1
+          fi
 
       - name: Upload as build artifact
         uses: actions/upload-artifact@v4
