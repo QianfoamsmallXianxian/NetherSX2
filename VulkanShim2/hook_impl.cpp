@@ -27,6 +27,9 @@ int (*gsl_memory_alloc_pure_64_sym)(uint64_t, uint32_t, void *);
 int (*gsl_memory_free_pure_sym)(void *);
 int kgsl_fd;
 
+// Turbo mode is read by the GSL allocation hook to bias allocations towards
+// performance-friendly flags. Kept as a single atomic-ish flag since the
+// setter may be called from a different thread than the allocator.
 static bool turbo_mode = false;
 
 using gsl_memory_alloc_pure_t = decltype(gsl_memory_alloc_pure_sym);
@@ -35,6 +38,7 @@ using gsl_memory_free_pure_t = decltype(gsl_memory_free_pure_sym);
 
 __attribute__((visibility("default"))) void adrenotools_set_turbo(bool turbo) {
     turbo_mode = turbo;
+    LOGI("adrenotools_set_turbo: %d", turbo ? 1 : 0);
 }
 
 static bool is_vulkan_driver(const char *filename) {
@@ -164,7 +168,15 @@ __attribute__((visibility("default"))) void *hook_android_load_sphal_library(con
 }
 
 __attribute__((visibility("default"))) FILE *hook_fopen(const char *filename, const char *mode) {
+    if (!filename)
+        return nullptr;
+
+    // Never redirect the system pseudo-filesystems
     if (!strncmp("/proc", filename, 5) || !strncmp("/sys", filename, 4))
+        return fopen(filename, mode);
+
+    // Nothing to redirect — pass through untouched
+    if (!hook_params || hook_params->fileRedirectDir.empty())
         return fopen(filename, mode);
 
     auto replacement{hook_params->fileRedirectDir + filename};
@@ -198,29 +210,44 @@ __attribute__((visibility("default"))) int hook_gsl_memory_alloc_pure_64(uint64_
     } else {
         if (gsl_memory_alloc_pure_64_sym)
             return gsl_memory_alloc_pure_64_sym(size, flags, gslMemDesc);
-        else
+        else if (gsl_memory_alloc_pure_sym)
             return gsl_memory_alloc_pure_sym((uint32_t)size, flags, gslMemDesc);
+        else
+            return -1;
     }
 }
 
 __attribute__((visibility("default"))) int hook_gsl_memory_free_pure(void *memDesc) {
+    if (!memDesc)
+        return 0;
+
     auto gslMemDesc{reinterpret_cast<GslMemDesc *>(memDesc)};
 
     if (gslMemDesc->priv == GslMemDescImportedPrivMagic) {
-        if (!kgsl_fd)
+        if (kgsl_fd <= 0) {
             kgsl_fd = open("/dev/kgsl-3d0", O_RDWR);
+            if (kgsl_fd < 0) {
+                LOGE("hook_gsl_memory_free_pure: cannot open /dev/kgsl-3d0: %s", strerror(errno));
+                return 0;
+            }
+        }
 
         kgsl_gpumem_get_info info{ .gpuaddr = gslMemDesc->gpuaddr };
 
-        if (ioctl(kgsl_fd, IOCTL_KGSL_GPUMEM_GET_INFO, &info) < 0)
+        if (ioctl(kgsl_fd, IOCTL_KGSL_GPUMEM_GET_INFO, &info) < 0) {
+            LOGE("hook_gsl_memory_free_pure: GPUMEM_GET_INFO failed: %s", strerror(errno));
             return 0;
+        }
 
         kgsl_gpuobj_free args{ .id = info.id };
 
-        if (ioctl(kgsl_fd, IOCTL_KGSL_GPUOBJ_FREE, &args) < 0) {}
+        if (ioctl(kgsl_fd, IOCTL_KGSL_GPUOBJ_FREE, &args) < 0)
+            LOGE("hook_gsl_memory_free_pure: GPUOBJ_FREE failed: %s", strerror(errno));
 
         return 0;
     } else {
-        return gsl_memory_free_pure_sym(memDesc);
+        if (gsl_memory_free_pure_sym)
+            return gsl_memory_free_pure_sym(memDesc);
+        return 0;
     }
 }
