@@ -39,10 +39,30 @@ jobs:
           exit 0
 
       - name: Download 4248 APK
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          curl -fsS -L --retry 3 --retry-connrefused \
-            -o "NetherSX2-4248.apk" \
-            "${{ steps.upstream.outputs.url }}"
+          if [ -f base.apk ]; then
+            cp base.apk NetherSX2-4248.apk
+            echo "use repo base.apk"
+            exit 0
+          fi
+
+          URL="${{ steps.upstream.outputs.url }}"
+          if [ -n "$URL" ]; then
+            curl -fsS -L --retry 3 --retry-connrefused -o NetherSX2-4248.apk "$URL" && exit 0
+          fi
+
+          gh release download --repo QianfoamsmallXianxian/NetherSX2 \
+            --pattern "*.apk" --dir . --clobber || true
+          for f in *.apk; do
+            [ -f "$f" ] || continue
+            [ "$f" = "NetherSX2-4248.apk" ] && continue
+            mv "$f" NetherSX2-4248.apk
+            break
+          done
+          [ -s NetherSX2-4248.apk ]
+
       - name: Download NDK
         run: |
           curl -fsSL -o ndk.zip https://dl.google.com/android/repository/android-ndk-r26d-linux.zip
