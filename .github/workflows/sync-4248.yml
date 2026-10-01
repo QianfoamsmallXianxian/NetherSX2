@@ -111,17 +111,3 @@ jobs:
           name: NetherSX2-4248-v0.7
           path: NetherSX2-4248.apk
 
-      - name: Publish release
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -e
-          REL="upstream-v0.7-custom"
-          if gh release view "$REL" >/dev/null 2>&1; then
-            echo "release $REL exists, skip"
-            exit 0
-          fi
-          gh release create "$REL" NetherSX2-4248.apk \
-            --title "NetherSX2 4248 v0.7 + custom driver" \
-            --generate-notes
