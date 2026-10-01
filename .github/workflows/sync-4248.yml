@@ -25,11 +25,13 @@ jobs:
           }
 
           URL=$(echo "$RELEASES" | jq -r '
-            [.[].assets[] | select(.name | test("4248"; "i")) | select(.name | endswith(".apk"))]
+            [.[] | (.assets // [])[] | select(type == "object")
+             | select((.name // "") | test("4248"; "i"))
+             | select((.name // "") | endswith(".apk"))]
             | .[0].browser_download_url // empty
           ')
           TAG=$(echo "$RELEASES" | jq -r '
-            [.[] | select(.assets | any(.name | test("4248"; "i") and (.name | endswith(".apk"))))]
+            [.[] | select((.assets // []) | map(select(type == "object") | (.name // "")) | any(test("4248"; "i")))]
             | .[0].tag_name // empty
           ')
 
