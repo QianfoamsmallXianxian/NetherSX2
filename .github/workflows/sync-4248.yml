@@ -97,15 +97,30 @@ jobs:
         run: |
           cd VulkanShim2
           TC=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin
-          CC=$TC/aarch64-linux-android24-clang
-          CXX=$TC/aarch64-linux-android24-clang++
+          CC=$TC/aarch64-linux-android26-clang
+          CXX=$TC/aarch64-linux-android26-clang++
+          AR=$TC/llvm-ar
           INC="-I. -Iadrenotools"
-          FLAGS="-shared -O2 -fPIC -DNDEBUG"
-          $CC  $FLAGS -std=c11   $INC main_hook.c -llog -ldl -o libmain_hook.so
-          $CXX $FLAGS -std=c++17 $INC hook_impl.cpp android_linker_ns.cpp elf_soname_patcher.cpp -llog -ldl -o libhook_impl.so
-          $CXX $FLAGS -std=c++17 $INC vulkan_shim.cpp custom_driver.cpp -llog -ldl -o libvulkad.so
-          ls -la *.so
+          FLAGS="-fPIC -O2 -fvisibility=default"
 
+          $CXX --target=aarch64-linux-android26 $FLAGS -c \
+            android_linker_ns.cpp elf_soname_patcher.cpp $INC
+          $AR rcs liblinkernsbypass.a android_linker_ns.o elf_soname_patcher.o
+
+          $CXX -shared $FLAGS -static-libstdc++ $INC \
+            -o libhook_impl.so hook_impl.cpp \
+            -L. -llinkernsbypass -ldl -llog
+
+          $CC -shared $FLAGS -z global $INC \
+            -o libmain_hook.so main_hook.c \
+            -L. -lhook_impl -ldl -llog
+
+          $CXX -shared $FLAGS -static-libstdc++ $INC \
+            -o libvulkad.so vulkan_shim.cpp custom_driver.cpp \
+            -L. -llinkernsbypass -ldl -llog
+
+          ls -la *.so *.a
+          strings libvulkad.so | grep -i "custom_driver\|driver.conf" || true
 
       - name: Verify downloaded APK
         run: |
