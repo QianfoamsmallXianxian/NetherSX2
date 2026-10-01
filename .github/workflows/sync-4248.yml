@@ -1,9 +1,9 @@
 name: Sync NetherSX2 4248 APK
 
 on:
+  workflow_dispatch:
   schedule:
     - cron: '0 */6 * * *'
-  workflow_dispatch:
 
 permissions:
   contents: write
@@ -15,94 +15,39 @@ jobs:
       - name: Check out repo
         uses: actions/checkout@v4
 
-      - name: Get latest upstream release
-        id: upstream
+      - name: Download base APK
         run: |
-          RELEASES=$(curl -fsS --retry 3 --retry-connrefused \
-            "https://api.github.com/repos/nckstwrt/NetherSX2-Turnip/releases?per_page=50") || {
-            echo "Failed to fetch releases"
-            exit 0
-          }
-
-          URL=$(echo "$RELEASES" | jq -r '
-            [.[] | (.assets // [])[] | select(type == "object")
-             | select((.name // "") | test("4248"; "i"))
-             | select((.name // "") | endswith(".apk"))]
-            | .[0].browser_download_url // empty
-          ')
-          TAG=$(echo "$RELEASES" | jq -r '
-            [.[] | select((.assets // []) | map(select(type == "object") | (.name // "")) | any(test("4248"; "i")))]
-            | .[0].tag_name // empty
-          ')
-
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "url=$URL" >> "$GITHUB_OUTPUT"
-          echo "TAG=$TAG"
-          echo "URL=$URL"
-
-      - name: Skip if no 4248 asset found
-        if: steps.upstream.outputs.url == ''
-        run: |
-          echo "No 4248 APK found in latest release"
-          exit 0
-
-      - name: Download 4248 APK
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
+          set -e
           if [ -f base.apk ]; then
             cp base.apk NetherSX2-4248.apk
-            echo "use repo base.apk"
+            echo "using repo base.apk"
             exit 0
           fi
-
-          try_repo() {
-            local repo="$1"
-            echo "== trying $repo =="
-            gh release download --repo "$repo" --pattern "*.apk" --dir dl --clobber 2>/dev/null || true
-            if [ -d dl ]; then
-              for f in dl/*.apk; do
-                [ -f "$f" ] || continue
-                if echo "$f" | grep -qiE '4248|turnip'; then
-                  cp "$f" NetherSX2-4248.apk
-                  rm -rf dl
-                  return 0
-                fi
-              done
-              rm -rf dl
-            fi
-            return 1
-          }
-
-          for repo in \
-            nckstwrt/NetherSX2-Turnip \
-            QianfoamsmallXianxian/NetherSX2 \
-            NetherSX2/NetherSX2
-          do
-            try_repo "$repo" && break
-          done
-
-          if [ ! -s NetherSX2-4248.apk ]; then
-            URL="${{ steps.upstream.outputs.url }}"
-            if [ -n "$URL" ]; then
-              curl -fsS -L --retry 3 --retry-connrefused -o NetherSX2-4248.apk "$URL" || true
-            fi
-          fi
-
-          if [ ! -s NetherSX2-4248.apk ]; then
-            echo "APK download failed, please add base.apk to repo root"
-            exit 1
-          fi
+          URL="https://github.com/nckstwrt/NetherSX2-Turnip/releases/download/v0.7/NetherSX2-v2.2n-4248-Turnip-v0.7.apk"
+          curl -fsSL --retry 3 -o NetherSX2-4248.apk "$URL"
           ls -la NetherSX2-4248.apk
 
-      - name: Download NDK
+      - name: Verify base APK
         run: |
+          set -e
+          [ -s NetherSX2-4248.apk ] || { echo "empty apk"; exit 1; }
+          MAGIC=$(head -c 4 NetherSX2-4248.apk | xxd -p)
+          [ "$MAGIC" = "504b0304" ] || { echo "not a zip/apk: $MAGIC"; exit 1; }
+          SIZE=$(stat -c%s NetherSX2-4248.apk)
+          [ "$SIZE" -gt 10485760 ] || { echo "apk too small: $SIZE"; exit 1; }
+          echo "apk size: $SIZE"
+          sha256sum NetherSX2-4248.apk
+
+      - name: Install NDK
+        run: |
+          set -e
           curl -fsSL -o ndk.zip https://dl.google.com/android/repository/android-ndk-r26d-linux.zip
           unzip -q ndk.zip
-          echo "NDK=$GITHUB_WORKSPACE/android-ndk-r26d" >> $GITHUB_ENV
+          echo "NDK=$GITHUB_WORKSPACE/android-ndk-r26d" >> "$GITHUB_ENV"
 
       - name: Build native libs
         run: |
+          set -e
           cd VulkanShim2
           TC=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin
           CC=$TC/aarch64-linux-android26-clang
@@ -130,35 +75,18 @@ jobs:
           ls -la *.so *.a
           strings libvulkad.so | grep -i "custom_driver\|driver.conf" || true
 
-      - name: Verify downloaded APK
-        run: |
-          # A valid APK is a ZIP archive; reject HTML error pages / truncated files
-          if [ ! -s NetherSX2-4248.apk ]; then
-            echo "Downloaded file is empty" >&2
-            exit 1
-          fi
-          if [ "$(head -c 4 NetherSX2-4248.apk | xxd -p)" != "504b0304" ]; then
-            echo "Downloaded file is not a ZIP/APK (got: $(head -c 16 NetherSX2-4248.apk | xxd -p))" >&2
-            exit 1
-          fi
-          APK_SIZE=$(stat -c%s NetherSX2-4248.apk)
-          echo "APK size: $APK_SIZE bytes"
-          echo "sha256: $(sha256sum NetherSX2-4248.apk | cut -d' ' -f1)"
-          if [ "$APK_SIZE" -lt 10485760 ]; then
-            echo "APK suspiciously small (<10MB), refusing to publish" >&2
-            exit 1
-          fi
       - name: Install apktool
         run: |
+          set -e
           sudo apt-get update -qq
           sudo apt-get install -y -qq zipalign apksigner unzip curl
           curl -fsSL -o apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v2.11.1/apktool_2.11.1.jar
 
       - name: Patch APK
         run: |
-          APK=$(find . -maxdepth 2 -name "NetherSX2-4248.apk" | head -n1)
-          [ -n "$APK" ] || { echo "APK not found"; exit 1; }
-          java -jar apktool.jar d -f "$APK" -o out
+          set -e
+          java -jar apktool.jar d -f NetherSX2-4248.apk -o out
+          mkdir -p out/lib/arm64-v8a
           cp VulkanShim2/libvulkad.so    out/lib/arm64-v8a/libvulkad.so
           cp VulkanShim2/libhook_impl.so out/lib/arm64-v8a/libhook_impl.so
           cp VulkanShim2/libmain_hook.so out/lib/arm64-v8a/libmain_hook.so
@@ -166,36 +94,32 @@ jobs:
 
       - name: Sign APK
         run: |
-          keytool -genkeypair -v -keystore ks.jks -alias k \\
-            -keyalg RSA -keysize 2048 -validity 10000 \\
+          set -e
+          keytool -genkeypair -v -keystore ks.jks -alias k \
+            -keyalg RSA -keysize 2048 -validity 10000 \
             -storepass android -keypass android -dname "CN=CI"
           zipalign -f 4 NetherSX2-4248.apk.new NetherSX2-4248-aligned.apk
-          apksigner sign --ks ks.jks --ks-key-alias k \\
-            --ks-pass pass:android --key-pass pass:android \\
+          apksigner sign --ks ks.jks --ks-key-alias k \
+            --ks-pass pass:android --key-pass pass:android \
             --out NetherSX2-4248.apk NetherSX2-4248-aligned.apk
           rm -f NetherSX2-4248-aligned.apk NetherSX2-4248.apk.new
 
-
-      - name: Upload as build artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: NetherSX2-4248-${{ steps.upstream.outputs.tag }}
+          name: NetherSX2-4248-v0.7
           path: NetherSX2-4248.apk
 
-      - name: Publish release if new
+      - name: Publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${{ steps.upstream.outputs.tag }}"
-          [ -z "$TAG" ] && { echo "no upstream tag, skip"; exit 0; }
-          RELEASE_TAG="upstream-$TAG"
-
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            echo "Release $RELEASE_TAG already exists, skipping."
+          set -e
+          REL="upstream-v0.7-custom"
+          if gh release view "$REL" >/dev/null 2>&1; then
+            echo "release $REL exists, skip"
             exit 0
           fi
-
-          gh release create "$RELEASE_TAG" \
-            "NetherSX2-4248.apk" \
-            --title "NetherSX2 4248 - $TAG" \
+          gh release create "$REL" NetherSX2-4248.apk \
+            --title "NetherSX2 4248 v0.7 + custom driver" \
             --generate-notes
