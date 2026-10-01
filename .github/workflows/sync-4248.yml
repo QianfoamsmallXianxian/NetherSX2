@@ -43,6 +43,25 @@ jobs:
           curl -fsS -L --retry 3 --retry-connrefused \
             -o "NetherSX2-4248.apk" \
             "${{ steps.upstream.outputs.url }}"
+      - name: Download NDK
+        run: |
+          curl -fsSL -o ndk.zip https://dl.google.com/android/repository/android-ndk-r26d-linux.zip
+          unzip -q ndk.zip
+          echo "NDK=$GITHUB_WORKSPACE/android-ndk-r26d" >> $GITHUB_ENV
+
+      - name: Build native libs
+        run: |
+          cd VulkanShim2
+          TC=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin
+          CC=$TC/aarch64-linux-android24-clang
+          CXX=$TC/aarch64-linux-android24-clang++
+          INC="-I. -Iadrenotools"
+          FLAGS="-shared -O2 -fPIC -DNDEBUG"
+          $CC  $FLAGS -std=c11   $INC main_hook.c -llog -ldl -o libmain_hook.so
+          $CXX $FLAGS -std=c++17 $INC hook_impl.cpp android_linker_ns.cpp elf_soname_patcher.cpp -llog -ldl -o libhook_impl.so
+          $CXX $FLAGS -std=c++17 $INC vulkan_shim.cpp custom_driver.cpp -llog -ldl -o libvulkad.so
+          ls -la *.so
+
 
       - name: Verify downloaded APK
         run: |
@@ -62,6 +81,33 @@ jobs:
             echo "APK suspiciously small (<10MB), refusing to publish" >&2
             exit 1
           fi
+      - name: Install apktool
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq zipalign apksigner unzip curl
+          curl -fsSL -o apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v2.11.1/apktool_2.11.1.jar
+
+      - name: Patch APK
+        run: |
+          APK=$(find . -maxdepth 2 -name "NetherSX2-4248.apk" | head -n1)
+          [ -n "$APK" ] || { echo "APK not found"; exit 1; }
+          java -jar apktool.jar d -f "$APK" -o out
+          cp VulkanShim2/libvulkad.so    out/lib/arm64-v8a/libvulkad.so
+          cp VulkanShim2/libhook_impl.so out/lib/arm64-v8a/libhook_impl.so
+          cp VulkanShim2/libmain_hook.so out/lib/arm64-v8a/libmain_hook.so
+          java -jar apktool.jar b out -o NetherSX2-4248.apk.new
+
+      - name: Sign APK
+        run: |
+          keytool -genkeypair -v -keystore ks.jks -alias k \\
+            -keyalg RSA -keysize 2048 -validity 10000 \\
+            -storepass android -keypass android -dname "CN=CI"
+          zipalign -f 4 NetherSX2-4248.apk.new NetherSX2-4248-aligned.apk
+          apksigner sign --ks ks.jks --ks-key-alias k \\
+            --ks-pass pass:android --key-pass pass:android \\
+            --out NetherSX2-4248.apk NetherSX2-4248-aligned.apk
+          rm -f NetherSX2-4248-aligned.apk NetherSX2-4248.apk.new
+
 
       - name: Upload as build artifact
         uses: actions/upload-artifact@v4
