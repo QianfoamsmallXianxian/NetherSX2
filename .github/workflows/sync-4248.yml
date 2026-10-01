@@ -17,8 +17,6 @@ jobs:
 
       - name: Get latest upstream release
         id: upstream
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RELEASES=$(curl -fsS --retry 3 --retry-connrefused \
             "https://api.github.com/repos/nckstwrt/NetherSX2-Turnip/releases?per_page=50") || {
@@ -27,12 +25,12 @@ jobs:
           }
 
           URL=$(echo "$RELEASES" | jq -r '
-            [.[] | select(.assets | any(.name | test("4248.*\.apk$"; "i")))][0].assets
-            | map(select(.name | test("4248.*\.apk$"; "i")))
+            [.[].assets[] | select(.name | test("4248"; "i")) | select(.name | endswith(".apk"))]
             | .[0].browser_download_url // empty
           ')
           TAG=$(echo "$RELEASES" | jq -r '
-            [.[] | select(.assets | any(.name | test("4248.*\.apk$"; "i")))][0].tag_name // empty
+            [.[] | select(.assets | any(.name | test("4248"; "i") and (.name | endswith(".apk"))))]
+            | .[0].tag_name // empty
           ')
 
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
