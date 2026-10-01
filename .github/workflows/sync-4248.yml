@@ -1,13 +1,14 @@
 name: Sync NetherSX2 4248 APK
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'VulkanShim2/**'
+      - '.github/workflows/sync-4248.yml'
   workflow_dispatch:
   schedule:
     - cron: '0 */6 * * *'
-
-permissions:
-  contents: write
-
 jobs:
   sync-4248:
     runs-on: ubuntu-latest
