@@ -83,9 +83,7 @@ void write_config_if_missing() {
 
     std::ofstream f(conf_path());
     if (!f) return;
-    f << "# enable_custom_driver: 0=off 1=force on\n"
-      << "# auto_detect: 1=auto use drivers/ if it has exactly one .so\n"
-      << "enable_custom_driver=0\n"
+    f << "enable_custom_driver=0\n"
       << "auto_detect=1\n"
       << "driver_dir=" << drivers_dir() << "\n"
       << "driver_name=" << kDefaultSo << "\n";
@@ -166,7 +164,7 @@ bool copy_file(const std::string& src, const std::string& dst) {
     return true;
 }
 
-}  // namespace
+}
 
 std::string resolve_custom_driver() {
     write_config_if_missing();
@@ -192,4 +190,4 @@ std::string resolve_custom_driver() {
     return dst;
 }
 
-}  // namespace custom_driver
+}
