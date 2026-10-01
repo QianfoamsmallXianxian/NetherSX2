@@ -135,7 +135,7 @@ jobs:
             echo "Downloaded file is empty" >&2
             exit 1
           fi
-          if ! head -c 4 NetherSX2-4248.apk | grep -q $'PK\x03\x04'; then
+          if [ "$(head -c 4 NetherSX2-4248.apk | xxd -p)" != "504b0304" ]; then
             echo "Downloaded file is not a ZIP/APK (got: $(head -c 16 NetherSX2-4248.apk | xxd -p))" >&2
             exit 1
           fi
@@ -185,6 +185,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ steps.upstream.outputs.tag }}"
+          [ -z "$TAG" ] && { echo "no upstream tag, skip"; exit 0; }
           RELEASE_TAG="upstream-$TAG"
 
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
