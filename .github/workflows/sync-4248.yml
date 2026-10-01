@@ -112,6 +112,7 @@ jobs:
           path: NetherSX2-4248.apk
 
       - name: Publish release
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
