@@ -2,4 +2,5 @@
 #include <string>
 namespace custom_driver {
 std::string resolve_custom_driver();
+inline std::string resolve() { return resolve_custom_driver(); }
 }

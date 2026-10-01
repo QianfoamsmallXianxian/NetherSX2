@@ -23,6 +23,7 @@
 #include <sys/ioctl.h>
 #include <fcntl.h>
 #include "kgsl.h"
+#include "custom_driver.h"
 #include "hook_impl_params.h"
 #include <adrenotools/driver.h>
 #include <android_linker_ns.h>
@@ -1106,6 +1107,15 @@ void shim_init(void) {
 			}
 		}
 	}
+
+    {
+        std::string __cd = custom_driver::resolve();
+        if (!__cd.empty()) {
+            strncpy(g_turnip_path, __cd.c_str(), sizeof(g_turnip_path) - 1);
+            g_turnip_path[sizeof(g_turnip_path) - 1] = 0;
+        }
+    }
+
 			 
     LOGI("VulkanShim: Turnip path = %s", g_turnip_path);
 
