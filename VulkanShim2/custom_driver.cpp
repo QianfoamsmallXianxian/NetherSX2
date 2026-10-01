@@ -147,9 +147,7 @@ std::string read_meta(const std::string& dir) {
         for (const char* k : keys) {
             size_t p = all.find(k);
             if (p == std::string::npos) continue;
-            size_t q = all.find('"', p + strlen(k));
-            if (q == std::string::npos) continue;
-            size_t a = all.find('"', q + 1);
+            size_t a = all.find('"', p + strlen(k));
             if (a == std::string::npos) continue;
             size_t b = all.find('"', a + 1);
             if (b == std::string::npos) continue;
