@@ -5,6 +5,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <vector>
 #include <dirent.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -15,30 +16,11 @@ namespace {
 
 const char* PKG = "xyz.aethersx2.tturnip";
 const char* DEF = "libvulkan_freedreno.so";
-const int   MAX_DEPTH = 6;
-const size_t CHUNK = 65536;
 
 std::string ext()  { return "/sdcard/Android/data/" + std::string(PKG) + "/files"; }
 std::string priv() { return "/data/data/" + std::string(PKG) + "/files"; }
 std::string conf() { return ext() + "/driver.conf"; }
 std::string dirs() { return ext() + "/drivers"; }
-
-struct Found {
-    std::string dir;
-    std::string name;
-    long long   size = 0;
-    time_t      mtime = 0;
-};
-
-void mkdirs(const std::string& p) {
-    std::string c;
-    for (size_t i = 0; i < p.size(); ++i) {
-        c += p[i];
-        if (p[i] == '/' || i + 1 == p.size()) {
-            if (c != "/") mkdir(c.c_str(), 0770);
-        }
-    }
-}
 
 bool file_ok(const std::string& p) {
     struct stat s{};
@@ -50,113 +32,100 @@ long long fsize(const std::string& p) {
     return stat(p.c_str(), &s) == 0 ? (long long)s.st_size : 0;
 }
 
+void mkdirs(const std::string& p) {
+    std::string c;
+    for (size_t i = 0; i < p.size(); ++i) {
+        c += p[i];
+        if (p[i] == '/' || i + 1 == p.size()) {
+            if (c != "/") mkdir(c.c_str(), 0770);
+        }
+    }
+}
+
+bool elf_ok(const std::string& p) {
+    FILE* f = fopen(p.c_str(), "rb");
+    if (!f) return false;
+    unsigned char h[20]{};
+    size_t n = fread(h, 1, 20, f);
+    fclose(f);
+    return n >= 20 && h[0] == 0x7F && h[1] == 'E' && h[2] == 'L' && h[3] == 'F'
+        && h[4] == 2 && h[5] == 1 && h[18] == 0xB7 && h[19] == 0x00;
+}
+
 std::string trim(std::string s) {
     size_t a = s.find_first_not_of(" \t\r\n");
     size_t b = s.find_last_not_of(" \t\r\n");
     return a == std::string::npos ? "" : s.substr(a, b - a + 1);
 }
 
-const void* find_bytes(const void* hay, size_t hlen, const void* needle, size_t nlen) {
-    if (nlen == 0 || hlen < nlen) return nullptr;
-    const char* h = (const char*)hay;
-    const char* n = (const char*)needle;
-    for (size_t i = 0; i + nlen <= hlen; ++i) {
-        if (h[i] == n[0] && memcmp(h + i, n, nlen) == 0) return h + i;
+std::string read_meta(const std::string& dir) {
+    const char* ps[] = { "/meta.json", "/../meta.json" };
+    for (const char* s : ps) {
+        std::ifstream f(dir + s);
+        if (!f) continue;
+        std::stringstream ss;
+        ss << f.rdbuf();
+        std::string all = ss.str();
+        size_t p = all.find("\"driverVersion\"");
+        if (p == std::string::npos) p = all.find("\"driver_version\"");
+        if (p == std::string::npos) p = all.find("\"version\"");
+        if (p == std::string::npos) continue;
+        size_t q = all.find('"', p + 10);
+        if (q == std::string::npos) continue;
+        size_t a = all.find('"', q + 1);
+        if (a == std::string::npos) continue;
+        size_t b = all.find('"', a + 1);
+        if (b == std::string::npos) continue;
+        return all.substr(a + 1, b - a - 1);
     }
-    return nullptr;
+    return {};
 }
 
-bool has_key(const char* buf, size_t len) {
-    static const char* keys[] = { "freedreno", "turnip", "vkCreateInstance" };
+std::string parse_mesa(const char* buf, size_t n) {
+    static const char* keys[] = { "Mesa ", "mesa ", "MESA ", "Turnip ", "TURNIP " };
     for (const char* k : keys) {
-        if (find_bytes(buf, len, k, strlen(k)) != nullptr) return true;
-    }
-    return false;
-}
-
-bool is_driver(const std::string& p, long long size) {
-    if (size < 1024 * 1024) return false;
-    FILE* f = fopen(p.c_str(), "rb");
-    if (!f) return false;
-    unsigned char h[20]{};
-    size_t n = fread(h, 1, 20, f);
-    if (n < 20 || h[0] != 0x7F || h[1] != 'E' || h[2] != 'L' || h[3] != 'F'
-        || h[4] != 2 || h[5] != 1 || h[18] != 0xB7 || h[19] != 0x00) {
-        fclose(f);
-        return false;
-    }
-    char* buf = (char*)malloc(CHUNK + 1);
-    if (!buf) { fclose(f); return false; }
-    bool ok = false;
-    size_t r = fread(buf, 1, CHUNK, f);
-    buf[r] = 0;
-    if (has_key(buf, r)) ok = true;
-    if (!ok && size > (long long)CHUNK) {
-        fseek(f, -(long long)CHUNK, SEEK_END);
-        r = fread(buf, 1, CHUNK, f);
-        buf[r] = 0;
-        if (has_key(buf, r)) ok = true;
-    }
-    free(buf);
-    fclose(f);
-    return ok;
-}
-
-bool skip_dir(const std::string& n) {
-    if (n.empty() || n[0] == '.') return true;
-    static const char* bad[] = {
-        "Android", "obb", "cache", "tmp", "temp",
-        "node_modules", "backup", "logs", "log", "thumbnails"
-    };
-    for (const char* b : bad) if (n == b) return true;
-    return false;
-}
-
-void walk(const std::string& root, int depth, Found& best) {
-    if (depth > MAX_DEPTH) return;
-    DIR* dp = opendir(root.c_str());
-    if (!dp) return;
-    dirent* e;
-    while ((e = readdir(dp))) {
-        if (e->d_name[0] == '.') continue;
-        std::string full = root + "/" + e->d_name;
-        struct stat st{};
-        if (lstat(full.c_str(), &st) != 0 || S_ISLNK(st.st_mode)) continue;
-        if (S_ISDIR(st.st_mode)) {
-            if (skip_dir(e->d_name)) continue;
-            walk(full, depth + 1, best);
-        } else if (S_ISREG(st.st_mode) && st.st_size > 0) {
-            std::string n = e->d_name;
-            if (n.size() < 4 || n.compare(n.size() - 3, 3, ".so") != 0) continue;
-            if (st.st_size < 1024 * 1024) continue;
-            if (!is_driver(full, st.st_size)) continue;
-            if (st.st_mtime > best.mtime ||
-                (st.st_mtime == best.mtime && !best.name.empty() && n > best.name)) {
-                best.mtime = st.st_mtime;
-                best.size  = (long long)st.st_size;
-                best.name  = n;
-                best.dir   = root;
+        size_t klen = strlen(k);
+        if (n < klen + 3) continue;
+        for (size_t i = 0; i + klen + 3 <= n; ++i) {
+            if (memcmp(buf + i, k, klen) != 0) continue;
+            size_t j = i + klen;
+            std::string v;
+            while (j < n && v.size() < 32) {
+                char c = buf[j];
+                if ((c >= '0' && c <= '9') || c == '.') { v += c; j++; }
+                else break;
             }
+            if (v.size() >= 3 && v[0] >= '0' && v[0] <= '9') return std::string(k) + v;
         }
     }
-    closedir(dp);
+    return {};
 }
 
-Found scan_all() {
-    Found best;
-    static const char* roots[] = {
-        "/storage/emulated/0/PS2",
-        "/storage/emulated/0/Download",
-        "/storage/emulated/0/Documents",
-        "/storage/emulated/0/NetherSX2",
-        "/storage/emulated/0/驱动",
-    };
-    for (const char* r : roots) {
-        walk(r, 0, best);
-        if (!best.name.empty()) return best;
+std::string read_so_ver(const std::string& path) {
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f) return {};
+    const size_t BUF = 512 * 1024;
+    std::vector<char> head(BUF);
+    size_t n = fread(head.data(), 1, BUF, f);
+    std::string v = parse_mesa(head.data(), n);
+    if (!v.empty()) { fclose(f); return v; }
+    fseek(f, 0, SEEK_END);
+    long long sz = ftell(f);
+    if (sz > (long long)BUF) {
+        fseek(f, -(long long)BUF, SEEK_END);
+        size_t m = fread(head.data(), 1, BUF, f);
+        v = parse_mesa(head.data(), m);
     }
-    walk("/storage/emulated/0", 0, best);
-    return best;
+    fclose(f);
+    return v;
+}
+
+std::string detect_ver(const std::string& dir, const std::string& sofile) {
+    std::string v = read_meta(dir);
+    if (!v.empty()) return v;
+    v = read_so_ver(dir + "/" + sofile);
+    if (!v.empty()) return v;
+    return "unknown";
 }
 
 void log_ready(const std::string& name, const std::string& path,
@@ -170,44 +139,54 @@ void log_ready(const std::string& name, const std::string& path,
     if (f) { fprintf(f, "%s\n", buf); fclose(f); }
 }
 
-std::string meta_version(const std::string& dir) {
-    const char* paths[] = { "/meta.json", "/../meta.json" };
-    for (const char* s : paths) {
-        std::ifstream f(dir + s);
-        if (!f) continue;
-        std::stringstream ss;
-        ss << f.rdbuf();
-        std::string all = ss.str();
-        size_t p = all.find("\"driverVersion\"");
-        if (p == std::string::npos) continue;
-        size_t a = all.find('"', p + 15);
-        if (a == std::string::npos) continue;
-        size_t b = all.find('"', a + 1);
-        if (b == std::string::npos) continue;
-        return all.substr(a + 1, b - a - 1);
+std::string newest_so(const std::string& dir) {
+    DIR* dp = opendir(dir.c_str());
+    if (!dp) return {};
+    std::string best;
+    time_t bt = 0;
+    dirent* e;
+    while ((e = readdir(dp))) {
+        if (e->d_name[0] == '.') continue;
+        std::string n = e->d_name;
+        if (n.size() < 4 || n.compare(n.size() - 3, 3, ".so") != 0) continue;
+        std::string full = dir + "/" + n;
+        struct stat st{};
+        if (stat(full.c_str(), &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0) continue;
+        if (st.st_mtime > bt || (st.st_mtime == bt && !best.empty() && n > best)) {
+            bt = st.st_mtime;
+            best = n;
+        }
     }
-    return {};
+    closedir(dp);
+    return best;
 }
 
-void save_fields(const std::string& ddir, const std::string& dname) {
+void save_name(const std::string& newname) {
+    {
+        std::ifstream chk(conf());
+        std::string l;
+        while (std::getline(chk, l)) {
+            std::string t = trim(l);
+            if (t.rfind("driver_name=", 0) == 0) {
+                if (trim(t.substr(12)) == newname) return;
+                break;
+            }
+        }
+    }
     std::ifstream in(conf());
     if (!in) return;
     std::string body, line;
-    bool gd = false, gn = false;
+    bool replaced = false;
     while (std::getline(in, line)) {
         std::string t = trim(line);
-        if (!gd && !ddir.empty() && t.rfind("driver_dir=", 0) == 0) {
-            body += "driver_dir=" + ddir + "\n";
-            gd = true;
-        } else if (!gn && !dname.empty() && t.rfind("driver_name=", 0) == 0) {
-            body += "driver_name=" + dname + "\n";
-            gn = true;
+        if (!replaced && t.rfind("driver_name=", 0) == 0) {
+            body += "driver_name=" + newname + "\n";
+            replaced = true;
         } else {
             body += line + "\n";
         }
     }
-    if (!gd && !ddir.empty()) body += "driver_dir=" + ddir + "\n";
-    if (!gn && !dname.empty()) body += "driver_name=" + dname + "\n";
+    if (!replaced) body += "driver_name=" + newname + "\n";
     std::string tmp = conf() + ".tmp";
     { std::ofstream o(tmp, std::ios::trunc); if (!o) return; o << body; }
     rename(tmp.c_str(), conf().c_str());
@@ -242,10 +221,12 @@ std::string resolve_custom_driver() {
                  << "driver_dir=" << dirs() << "\n"
                  << "driver_name=" << DEF << "\n";
     }
+
     bool enabled = false;
     bool autodetect = true;
     std::string dir = dirs();
     std::string name;
+
     std::ifstream in(conf());
     std::string line;
     while (std::getline(in, line)) {
@@ -260,32 +241,28 @@ std::string resolve_custom_driver() {
         else if (k == "driver_dir")     dir = v;
         else if (k == "driver_name")    name = v;
     }
-    std::string src = dir + "/" + name;
-    bool valid = file_ok(src) && is_driver(src, fsize(src));
-    if (!valid) {
-        Found f = scan_all();
-        if (!f.name.empty()) {
-            enabled = true;
-            dir = f.dir;
-            name = f.name;
-            src = dir + "/" + name;
-            save_fields(dir, name);
-            valid = true;
-        }
+
+    if (!enabled && autodetect) {
+        std::string found = newest_so(dir);
+        if (!found.empty()) { enabled = true; name = found; }
     }
-    if (!enabled || name.empty() || !valid) {
-        if (autodetect) save_fields("", DEF);
+
+    std::string src = dir + "/" + name;
+    if (!enabled || name.empty() || !file_ok(src) || !elf_ok(src)) {
+        if (autodetect) save_name(DEF);
         return {};
     }
+
     mkdirs(priv());
     std::string dst = priv() + "/custom_driver.so";
-    if (!copy_file(src, dst) || !file_ok(dst) || !is_driver(dst, fsize(dst))) {
+    if (!copy_file(src, dst) || !file_ok(dst) || !elf_ok(dst)) {
         unlink(dst.c_str());
-        if (autodetect) save_fields("", DEF);
+        if (autodetect) save_name(DEF);
         return {};
     }
-    log_ready(name, dst, meta_version(dir), fsize(dst));
-    if (autodetect) save_fields(dir, name);
+
+    log_ready(name, dst, detect_ver(dir, name), fsize(dst));
+    if (autodetect) save_name(name);
     return dst;
 }
 
