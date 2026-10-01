@@ -16,6 +16,8 @@ namespace {
 
 const char* PKG = "xyz.aethersx2.tturnip";
 const char* DEF = "libvulkan_freedreno.so";
+const size_t SCAN_BUF = 1 << 20;
+const size_t HASH_BUF = 1 << 16;
 
 std::string ext()  { return "/sdcard/Android/data/" + std::string(PKG) + "/files"; }
 std::string priv() { return "/data/data/" + std::string(PKG) + "/files"; }
@@ -58,6 +60,81 @@ std::string trim(std::string s) {
     return a == std::string::npos ? "" : s.substr(a, b - a + 1);
 }
 
+unsigned int crc32(const unsigned char* p, size_t n, unsigned int c = 0xFFFFFFFFu) {
+    for (size_t i = 0; i < n; ++i) {
+        c ^= p[i];
+        for (int k = 0; k < 8; ++k) c = (c >> 1) ^ (0xEDB88320u & (~(c & 1) + 1));
+    }
+    return c;
+}
+
+std::string sample_hash(const std::string& path, long long total) {
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f) return "00000000";
+    std::vector<unsigned char> buf(HASH_BUF);
+    unsigned int c = 0xFFFFFFFFu;
+
+    size_t n = fread(buf.data(), 1, HASH_BUF, f);
+    c = crc32(buf.data(), n, c);
+
+    if (total > (long long)HASH_BUF * 2) {
+        fseek(f, total / 2 - HASH_BUF / 2, SEEK_SET);
+        n = fread(buf.data(), 1, HASH_BUF, f);
+        c = crc32(buf.data(), n, c);
+
+        fseek(f, -(long long)HASH_BUF, SEEK_END);
+        n = fread(buf.data(), 1, HASH_BUF, f);
+        c = crc32(buf.data(), n, c);
+    }
+
+    fclose(f);
+    char out[16];
+    snprintf(out, sizeof(out), "%08x", c ^ 0xFFFFFFFFu);
+    return out;
+}
+
+std::string parse_mesa(const char* buf, size_t n) {
+    if (n < 6) return {};
+    static const char starts[] = { 'M', 'm', 'T', 't' };
+    for (size_t i = 0; i + 6 <= n; ++i) {
+        char c = buf[i];
+        if (c != 'M' && c != 'm' && c != 'T' && c != 't') continue;
+        const char* k = nullptr;
+        if (memcmp(buf + i, "Mesa ", 5) == 0) k = "Mesa ";
+        else if (memcmp(buf + i, "mesa ", 5) == 0) k = "mesa ";
+        else if (memcmp(buf + i, "Turnip ", 7) == 0) k = "Turnip ";
+        else if (memcmp(buf + i, "turnip ", 7) == 0) k = "turnip ";
+        if (!k) continue;
+        size_t klen = strlen(k);
+        size_t j = i + klen;
+        std::string v;
+        while (j < n && v.size() < 32) {
+            char d = buf[j];
+            if ((d >= '0' && d <= '9') || d == '.') { v += d; j++; }
+            else break;
+        }
+        if (v.size() >= 3 && v[0] >= '0' && v[0] <= '9') return std::string(k) + v;
+    }
+    return {};
+}
+
+std::string read_so_ver(const std::string& path) {
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f) return {};
+    std::vector<char> buf(SCAN_BUF);
+    std::string found;
+    while (true) {
+        size_t n = fread(buf.data(), 1, buf.size(), f);
+        if (n == 0) break;
+        found = parse_mesa(buf.data(), n);
+        if (!found.empty()) break;
+        if (n < buf.size()) break;
+        fseek(f, -(long long)64, SEEK_CUR);
+    }
+    fclose(f);
+    return found;
+}
+
 std::string read_meta(const std::string& dir) {
     const char* ps[] = { "/meta.json", "/../meta.json" };
     for (const char* s : ps) {
@@ -66,74 +143,32 @@ std::string read_meta(const std::string& dir) {
         std::stringstream ss;
         ss << f.rdbuf();
         std::string all = ss.str();
-        size_t p = all.find("\"driverVersion\"");
-        if (p == std::string::npos) p = all.find("\"driver_version\"");
-        if (p == std::string::npos) p = all.find("\"version\"");
-        if (p == std::string::npos) continue;
-        size_t q = all.find('"', p + 10);
-        if (q == std::string::npos) continue;
-        size_t a = all.find('"', q + 1);
-        if (a == std::string::npos) continue;
-        size_t b = all.find('"', a + 1);
-        if (b == std::string::npos) continue;
-        return all.substr(a + 1, b - a - 1);
-    }
-    return {};
-}
-
-std::string parse_mesa(const char* buf, size_t n) {
-    static const char* keys[] = { "Mesa ", "mesa ", "MESA ", "Turnip ", "TURNIP " };
-    for (const char* k : keys) {
-        size_t klen = strlen(k);
-        if (n < klen + 3) continue;
-        for (size_t i = 0; i + klen + 3 <= n; ++i) {
-            if (memcmp(buf + i, k, klen) != 0) continue;
-            size_t j = i + klen;
-            std::string v;
-            while (j < n && v.size() < 32) {
-                char c = buf[j];
-                if ((c >= '0' && c <= '9') || c == '.') { v += c; j++; }
-                else break;
-            }
-            if (v.size() >= 3 && v[0] >= '0' && v[0] <= '9') return std::string(k) + v;
+        const char* keys[] = { "\"driverVersion\"", "\"driver_version\"", "\"version\"" };
+        for (const char* k : keys) {
+            size_t p = all.find(k);
+            if (p == std::string::npos) continue;
+            size_t q = all.find('"', p + strlen(k));
+            if (q == std::string::npos) continue;
+            size_t a = all.find('"', q + 1);
+            if (a == std::string::npos) continue;
+            size_t b = all.find('"', a + 1);
+            if (b == std::string::npos) continue;
+            return all.substr(a + 1, b - a - 1);
         }
     }
     return {};
 }
 
-std::string read_so_ver(const std::string& path) {
-    FILE* f = fopen(path.c_str(), "rb");
-    if (!f) return {};
-    const size_t BUF = 512 * 1024;
-    std::vector<char> head(BUF);
-    size_t n = fread(head.data(), 1, BUF, f);
-    std::string v = parse_mesa(head.data(), n);
-    if (!v.empty()) { fclose(f); return v; }
-    fseek(f, 0, SEEK_END);
-    long long sz = ftell(f);
-    if (sz > (long long)BUF) {
-        fseek(f, -(long long)BUF, SEEK_END);
-        size_t m = fread(head.data(), 1, BUF, f);
-        v = parse_mesa(head.data(), m);
-    }
-    fclose(f);
-    return v;
-}
-
-std::string detect_ver(const std::string& dir, const std::string& sofile) {
-    std::string v = read_meta(dir);
-    if (!v.empty()) return v;
-    v = read_so_ver(dir + "/" + sofile);
-    if (!v.empty()) return v;
-    return "unknown";
-}
-
 void log_ready(const std::string& name, const std::string& path,
-               const std::string& ver, long long size) {
+               const std::string& hash, const std::string& meta,
+               const std::string& so, long long size) {
     char buf[1024];
     snprintf(buf, sizeof(buf),
-             "custom driver: name=%s size=%lld version=%s path=%s",
-             name.c_str(), size, ver.empty() ? "unknown" : ver.c_str(), path.c_str());
+             "custom driver: name=%s size=%lld hash=%s meta=%s so=%s path=%s",
+             name.c_str(), size, hash.c_str(),
+             meta.empty() ? "none" : meta.c_str(),
+             so.empty() ? "none" : so.c_str(),
+             path.c_str());
     __android_log_print(ANDROID_LOG_INFO, "NetherSX2-Turnip", "%s", buf);
     FILE* f = fopen((ext() + "/vulkan_shim.log").c_str(), "ae");
     if (f) { fprintf(f, "%s\n", buf); fclose(f); }
@@ -162,28 +197,20 @@ std::string newest_so(const std::string& dir) {
 }
 
 void save_name(const std::string& newname) {
-    {
-        std::ifstream chk(conf());
-        std::string l;
-        while (std::getline(chk, l)) {
-            std::string t = trim(l);
-            if (t.rfind("driver_name=", 0) == 0) {
-                if (trim(t.substr(12)) == newname) return;
-                break;
-            }
-        }
-    }
-    std::ifstream in(conf());
-    if (!in) return;
     std::string body, line;
     bool replaced = false;
-    while (std::getline(in, line)) {
-        std::string t = trim(line);
-        if (!replaced && t.rfind("driver_name=", 0) == 0) {
-            body += "driver_name=" + newname + "\n";
-            replaced = true;
-        } else {
-            body += line + "\n";
+    {
+        std::ifstream in(conf());
+        if (!in) return;
+        while (std::getline(in, line)) {
+            std::string t = trim(line);
+            if (!replaced && t.rfind("driver_name=", 0) == 0) {
+                if (trim(t.substr(12)) == newname) return;
+                body += "driver_name=" + newname + "\n";
+                replaced = true;
+            } else {
+                body += line + "\n";
+            }
         }
     }
     if (!replaced) body += "driver_name=" + newname + "\n";
@@ -197,11 +224,11 @@ bool copy_file(const std::string& src, const std::string& dst) {
     if (!in) return false;
     FILE* out = fopen(dst.c_str(), "wb");
     if (!out) { fclose(in); return false; }
-    char buf[65536];
+    std::vector<char> buf(SCAN_BUF);
     size_t r;
     bool ok = true;
-    while ((r = fread(buf, 1, sizeof(buf), in)) > 0) {
-        if (fwrite(buf, 1, r, out) != r) { ok = false; break; }
+    while ((r = fread(buf.data(), 1, buf.size(), in)) > 0) {
+        if (fwrite(buf.data(), 1, r, out) != r) { ok = false; break; }
     }
     fclose(in);
     fclose(out);
@@ -253,6 +280,11 @@ std::string resolve_custom_driver() {
         return {};
     }
 
+    long long sz = fsize(src);
+    std::string hash = sample_hash(src, sz);
+    std::string meta = read_meta(dir);
+    std::string so = read_so_ver(src);
+
     mkdirs(priv());
     std::string dst = priv() + "/custom_driver.so";
     if (!copy_file(src, dst) || !file_ok(dst) || !elf_ok(dst)) {
@@ -261,7 +293,7 @@ std::string resolve_custom_driver() {
         return {};
     }
 
-    log_ready(name, dst, detect_ver(dir, name), fsize(dst));
+    log_ready(name, dst, hash, meta, so, sz);
     if (autodetect) save_name(name);
     return dst;
 }
