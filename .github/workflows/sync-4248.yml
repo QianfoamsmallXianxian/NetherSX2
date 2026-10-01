@@ -17,20 +17,28 @@ jobs:
 
       - name: Get latest upstream release
         id: upstream
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          RELEASE_JSON=$(curl -fsS --retry 3 --retry-connrefused \
-            https://api.github.com/repos/nckstwrt/NetherSX2-Turnip/releases/latest) || {
-            echo "Failed to fetch upstream release metadata"
+          RELEASES=$(curl -fsS --retry 3 --retry-connrefused \
+            "https://api.github.com/repos/nckstwrt/NetherSX2-Turnip/releases?per_page=50") || {
+            echo "Failed to fetch releases"
             exit 0
           }
 
-          TAG=$(echo "$RELEASE_JSON" | jq -r '.tag_name')
-          URL=$(echo "$RELEASE_JSON" | jq -r \
-            '.assets[] | select(.name | test("4248.*\\.apk$")) | .browser_download_url' \
-            | head -n 1)
+          URL=$(echo "$RELEASES" | jq -r '
+            [.[] | select(.assets | any(.name | test("4248.*\.apk$"; "i")))][0].assets
+            | map(select(.name | test("4248.*\.apk$"; "i")))
+            | .[0].browser_download_url // empty
+          ')
+          TAG=$(echo "$RELEASES" | jq -r '
+            [.[] | select(.assets | any(.name | test("4248.*\.apk$"; "i")))][0].tag_name // empty
+          ')
 
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "TAG=$TAG"
+          echo "URL=$URL"
 
       - name: Skip if no 4248 asset found
         if: steps.upstream.outputs.url == ''
