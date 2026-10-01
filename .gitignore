@@ -1,0 +1,9 @@
+*.bak.*
+*.bak
+push_custom_driver.sh
+*.keystore
+*.jks
+*.apk
+*.so.tmp
+build/
+out/

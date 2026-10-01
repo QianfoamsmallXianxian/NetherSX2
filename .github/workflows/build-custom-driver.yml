@@ -1,0 +1,64 @@
+name: Build custom driver
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: NDK
+        run: |
+          curl -fsSL -o ndk.zip https://dl.google.com/android/repository/android-ndk-r26d-linux.zip
+          unzip -q ndk.zip
+          echo "NDK=$GITHUB_WORKSPACE/android-ndk-r26d" >> $GITHUB_ENV
+      - name: Tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq zipalign apksigner unzip curl
+          curl -fsSL -o apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v2.11.1/apktool_2.11.1.jar
+      - name: Build
+        run: |
+          cd VulkanShim2
+          TC=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin
+          CC=$TC/aarch64-linux-android24-clang
+          CXX=$TC/aarch64-linux-android24-clang++
+          INC="-I. -Iadrenotools"
+          FLAGS="-shared -O2 -fPIC -DNDEBUG"
+          $CC  $FLAGS -std=c11   $INC main_hook.c -llog -ldl -o libmain_hook.so
+          $CXX $FLAGS -std=c++17 $INC hook_impl.cpp android_linker_ns.cpp elf_soname_patcher.cpp -llog -ldl -o libhook_impl.so
+          $CXX $FLAGS -std=c++17 $INC vulkan_shim.cpp custom_driver.cpp -llog -ldl -o libvulkad.so
+          ls -la *.so
+      - name: Base APK
+        run: |
+          if [ -f base.apk ]; then
+            echo "use repo base.apk"
+          else
+            curl -fsSL -o base.apk "https://github.com/QianfoamsmallXianxian/NetherSX2/releases/latest/download/NetherSX2-Turnip.apk"
+          fi
+          ls -la base.apk
+      - name: Patch
+        run: |
+          java -jar apktool.jar d -f base.apk -o out
+          cp VulkanShim2/libvulkad.so    out/lib/arm64-v8a/libvulkad.so
+          cp VulkanShim2/libhook_impl.so out/lib/arm64-v8a/libhook_impl.so
+          cp VulkanShim2/libmain_hook.so out/lib/arm64-v8a/libmain_hook.so
+          java -jar apktool.jar b out -o mod.apk
+      - name: Sign
+        run: |
+          keytool -genkeypair -v -keystore ks.jks -alias k \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass android -keypass android -dname "CN=CI"
+          zipalign -f 4 mod.apk mod-aligned.apk
+          apksigner sign --ks ks.jks --ks-key-alias k \
+            --ks-pass pass:android --key-pass pass:android \
+            --out mod-signed.apk mod-aligned.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NetherSX2-Turnip-custom-driver
+          path: mod-signed.apk
