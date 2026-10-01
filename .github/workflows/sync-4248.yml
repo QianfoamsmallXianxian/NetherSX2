@@ -48,20 +48,44 @@ jobs:
             exit 0
           fi
 
-          URL="${{ steps.upstream.outputs.url }}"
-          if [ -n "$URL" ]; then
-            curl -fsS -L --retry 3 --retry-connrefused -o NetherSX2-4248.apk "$URL" && exit 0
+          try_repo() {
+            local repo="$1"
+            echo "== trying $repo =="
+            gh release download --repo "$repo" --pattern "*.apk" --dir dl --clobber 2>/dev/null || true
+            if [ -d dl ]; then
+              for f in dl/*.apk; do
+                [ -f "$f" ] || continue
+                if echo "$f" | grep -qiE '4248|turnip'; then
+                  cp "$f" NetherSX2-4248.apk
+                  rm -rf dl
+                  return 0
+                fi
+              done
+              rm -rf dl
+            fi
+            return 1
+          }
+
+          for repo in \
+            nckstwrt/NetherSX2-Turnip \
+            QianfoamsmallXianxian/NetherSX2 \
+            NetherSX2/NetherSX2
+          do
+            try_repo "$repo" && break
+          done
+
+          if [ ! -s NetherSX2-4248.apk ]; then
+            URL="${{ steps.upstream.outputs.url }}"
+            if [ -n "$URL" ]; then
+              curl -fsS -L --retry 3 --retry-connrefused -o NetherSX2-4248.apk "$URL" || true
+            fi
           fi
 
-          gh release download --repo QianfoamsmallXianxian/NetherSX2 \
-            --pattern "*.apk" --dir . --clobber || true
-          for f in *.apk; do
-            [ -f "$f" ] || continue
-            [ "$f" = "NetherSX2-4248.apk" ] && continue
-            mv "$f" NetherSX2-4248.apk
-            break
-          done
-          [ -s NetherSX2-4248.apk ]
+          if [ ! -s NetherSX2-4248.apk ]; then
+            echo "APK download failed, please add base.apk to repo root"
+            exit 1
+          fi
+          ls -la NetherSX2-4248.apk
 
       - name: Download NDK
         run: |
