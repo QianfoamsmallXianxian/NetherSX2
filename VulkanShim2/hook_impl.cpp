@@ -1,3 +1,16 @@
+#include <android/log.h>
+#ifndef LOGE
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "NetherSX2-Turnip", __VA_ARGS__)
+#endif
+#ifndef LOGW
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, "NetherSX2-Turnip", __VA_ARGS__)
+#endif
+#ifndef LOGI
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "NetherSX2-Turnip", __VA_ARGS__)
+#endif
+#ifndef LOGD
+#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, "NetherSX2-Turnip", __VA_ARGS__)
+#endif
 // 修改点：
 // 1. 精确识别 Vulkan 驱动
 // 2. 日志降级

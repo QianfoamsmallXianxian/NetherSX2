@@ -1,3 +1,4 @@
+#include <cstring>
 // SPDX-License-Identifier: BSD-2-Clause
 // Copyright © 2021 Billy Laws
 
