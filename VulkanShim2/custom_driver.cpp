@@ -1,92 +1,101 @@
 #include "custom_driver.h"
-#include <string>
-#include <fstream>
+#include <android/log.h>
 #include <cstdio>
 #include <cstring>
-#include <cstdlib>
-#include <unistd.h>
+#include <fstream>
+#include <string>
+#include <dirent.h>
 #include <sys/stat.h>
-#include <sys/types.h>
-#include <android/log.h>
+#include <unistd.h>
 
 namespace custom_driver {
+namespace {
 
-static const char* TAG = "NetherSX2Turnip";
-static const char* PKG = "xyz.aethersx2.tturnip";
-static const char* CONF_NAME = "driver.conf";
-static const char* PRIVATE_SO_NAME = "custom_driver.so";
-static const char* DEFAULT_DIR_NAME = "drivers";
-static const char* DEFAULT_SO_NAME = "libvulkan_freedreno.so";
+const char* kTag       = "NetherSX2-Turnip";
+const char* kPkg       = "xyz.aethersx2.tturnip";
+const char* kConfName  = "driver.conf";
+const char* kPrivateSo = "custom_driver.so";
+const char* kDefaultSo = "libvulkan_freedreno.so";
 
-static std::string external_files_dir() {
-    return std::string("/sdcard/Android/data/") + PKG + "/files";
+std::string ext_dir()     { return std::string("/sdcard/Android/data/") + kPkg + "/files"; }
+std::string priv_dir()    { return std::string("/data/data/") + kPkg + "/files"; }
+std::string conf_path()   { return ext_dir() + "/" + kConfName; }
+std::string drivers_dir() { return ext_dir() + "/drivers"; }
+
+void log_ready(const std::string& p) {
+    __android_log_print(ANDROID_LOG_INFO, kTag, "custom driver ready: %s", p.c_str());
+    FILE* f = fopen((ext_dir() + "/vulkan_shim.log").c_str(), "ae");
+    if (!f) return;
+    fprintf(f, "custom driver ready: %s\n", p.c_str());
+    fclose(f);
 }
-static std::string private_files_dir() {
-    return std::string("/data/data/") + PKG + "/files";
+
+bool is_file(const std::string& p) {
+    struct stat st{};
+    return stat(p.c_str(), &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0;
 }
-static std::string config_path() {
-    return external_files_dir() + "/" + CONF_NAME;
-}
-static std::string default_driver_dir() {
-    return external_files_dir() + "/" + DEFAULT_DIR_NAME;
-}
-static std::string private_so_path() {
-    return private_files_dir() + "/" + PRIVATE_SO_NAME;
-}
-static void log_line(const std::string& msg) {
-    __android_log_print(ANDROID_LOG_INFO, TAG, "%s", msg.c_str());
-    std::string p = external_files_dir() + "/vulkan_shim.log";
-    FILE* fp = fopen(p.c_str(), "a");
-    if (!fp) return;
-    fprintf(fp, "%s\n", msg.c_str());
-    fclose(fp);
-}
-static bool ensure_dir(const std::string& path) {
-    if (path.empty()) return false;
+
+bool mkdirs(const std::string& p) {
     std::string cur;
-    for (size_t i = 0; i < path.size(); ++i) {
-        cur += path[i];
-        if (path[i] == '/' || i + 1 == path.size()) {
-            if (cur == "/" || cur.empty()) continue;
-            struct stat st;
-            if (stat(cur.c_str(), &st) == 0) {
-                if (!S_ISDIR(st.st_mode)) return false;
-                continue;
-            }
-            if (mkdir(cur.c_str(), 0770) != 0) return false;
-        }
+    for (size_t i = 0; i < p.size(); ++i) {
+        cur += p[i];
+        if (p[i] != '/' && i + 1 != p.size()) continue;
+        if (cur == "/") continue;
+        mkdir(cur.c_str(), 0770);
     }
     return true;
 }
-static std::string trim(const std::string& s) {
-    size_t a = 0;
-    while (a < s.size() && (s[a] == ' ' || s[a] == '\t' || s[a] == '\r' || s[a] == '\n')) ++a;
-    size_t b = s.size();
-    while (b > a && (s[b - 1] == ' ' || s[b - 1] == '\t' || s[b - 1] == '\r' || s[b - 1] == '\n')) --b;
-    return s.substr(a, b - a);
-}
-static bool write_default_config() {
-    if (!ensure_dir(external_files_dir())) return false;
-    std::string p = config_path();
-    if (access(p.c_str(), F_OK) == 0) return true;
-    std::ofstream f(p);
+
+bool elf_ok(const std::string& p) {
+    FILE* f = fopen(p.c_str(), "rb");
     if (!f) return false;
-    f << "enable_custom_driver=0\n";
-    f << "driver_dir=" << default_driver_dir() << "\n";
-    f << "driver_name=" << DEFAULT_SO_NAME << "\n";
-    f.close();
-    ensure_dir(default_driver_dir());
-    return true;
+    unsigned char h[20]{};
+    size_t n = fread(h, 1, 20, f);
+    fclose(f);
+    if (n < 20) return false;
+    if (h[0] != 0x7F || h[1] != 'E' || h[2] != 'L' || h[3] != 'F') return false;
+    if (h[4] != 2 || h[5] != 1) return false;
+    return h[18] == 0xB7 && h[19] == 0x00;
 }
+
+std::string trim(std::string s) {
+    size_t a = s.find_first_not_of(" \t\r\n");
+    size_t b = s.find_last_not_of(" \t\r\n");
+    return a == std::string::npos ? "" : s.substr(a, b - a + 1);
+}
+
+bool ends_with(const std::string& s, const char* suf) {
+    size_t n = strlen(suf);
+    return s.size() >= n && s.compare(s.size() - n, n, suf) == 0;
+}
+
 struct Config {
-    bool enable = false;
+    bool        enabled    = false;
+    bool        autoDetect = true;
     std::string dir;
     std::string name;
 };
-static Config read_config() {
+
+void write_config_if_missing() {
+    mkdirs(ext_dir());
+    mkdirs(drivers_dir());
+    if (is_file(conf_path())) return;
+
+    std::ofstream f(conf_path());
+    if (!f) return;
+    f << "# enable_custom_driver: 0=off 1=force on\n"
+      << "# auto_detect: 1=auto use drivers/ if it has exactly one .so\n"
+      << "enable_custom_driver=0\n"
+      << "auto_detect=1\n"
+      << "driver_dir=" << drivers_dir() << "\n"
+      << "driver_name=" << kDefaultSo << "\n";
+}
+
+Config read_config() {
     Config c;
-    std::ifstream f(config_path());
+    std::ifstream f(conf_path());
     if (!f) return c;
+
     std::string line;
     while (std::getline(f, line)) {
         line = trim(line);
@@ -95,59 +104,92 @@ static Config read_config() {
         if (pos == std::string::npos) continue;
         std::string k = trim(line.substr(0, pos));
         std::string v = trim(line.substr(pos + 1));
-        if (k == "enable_custom_driver") c.enable = (v == "1" || v == "true" || v == "TRUE");
-        else if (k == "driver_dir") c.dir = v;
-        else if (k == "driver_name") c.name = v;
+        if (k == "enable_custom_driver")
+            c.enabled = (v == "1" || v == "true" || v == "TRUE");
+        else if (k == "auto_detect")
+            c.autoDetect = (v == "1" || v == "true" || v == "TRUE");
+        else if (k == "driver_dir")
+            c.dir = v;
+        else if (k == "driver_name")
+            c.name = v;
     }
     return c;
 }
-static bool is_regular_file(const std::string& p) {
-    struct stat st;
-    if (stat(p.c_str(), &st) != 0) return false;
-    return S_ISREG(st.st_mode) && st.st_size > 0;
+
+std::string scan_single_so(const std::string& dir) {
+    DIR* d = opendir(dir.c_str());
+    if (!d) return {};
+
+    std::string found;
+    int count = 0;
+    dirent* e;
+    while ((e = readdir(d)) != nullptr) {
+        if (e->d_name[0] == '.') continue;
+        std::string n = e->d_name;
+        if (!ends_with(n, ".so")) continue;
+        if (!is_file(dir + "/" + n)) continue;
+        found = n;
+        if (++count > 1) break;
+    }
+    closedir(d);
+    return count == 1 ? found : std::string{};
 }
-static bool copy_file(const std::string& src, const std::string& dst) {
-    std::ifstream in(src, std::ios::binary);
+
+void auto_detect(Config& c) {
+    if (c.enabled || !c.autoDetect) return;
+
+    std::string dir  = c.dir.empty() ? drivers_dir() : c.dir;
+    std::string name = scan_single_so(dir);
+    if (name.empty()) return;
+
+    c.enabled = true;
+    c.dir     = dir;
+    c.name    = name;
+}
+
+bool copy_file(const std::string& src, const std::string& dst) {
+    FILE* in = fopen(src.c_str(), "rb");
     if (!in) return false;
-    std::ofstream out(dst, std::ios::binary | std::ios::trunc);
-    if (!out) return false;
+    FILE* out = fopen(dst.c_str(), "wb");
+    if (!out) { fclose(in); return false; }
+
+    bool ok = true;
     char buf[65536];
-    while (in.read(buf, sizeof(buf)) || in.gcount() > 0) {
-        out.write(buf, in.gcount());
-        if (!out) return false;
+    size_t r;
+    while ((r = fread(buf, 1, sizeof(buf), in)) > 0) {
+        if (fwrite(buf, 1, r, out) != r) { ok = false; break; }
     }
-    out.close();
+    fclose(in);
+    fclose(out);
+    if (!ok) { unlink(dst.c_str()); return false; }
     chmod(dst.c_str(), 0700);
-    return is_regular_file(dst);
+    return true;
 }
+
+}  // namespace
+
 std::string resolve_custom_driver() {
-    ensure_dir(external_files_dir());
-    write_default_config();
+    write_config_if_missing();
+
     Config c = read_config();
-    if (!c.enable) {
-        log_line("custom driver disabled");
-        return "";
+    auto_detect(c);
+
+    if (!c.enabled || c.dir.empty() || c.name.empty()) return {};
+
+    std::string src = c.dir + "/" + c.name;
+    if (!is_file(src)) return {};
+    if (!elf_ok(src)) return {};
+
+    mkdirs(priv_dir());
+    std::string dst = priv_dir() + "/" + kPrivateSo;
+
+    if (!copy_file(src, dst) || !is_file(dst) || !elf_ok(dst)) {
+        unlink(dst.c_str());
+        return {};
     }
-    if (c.dir.empty() || c.name.empty()) {
-        log_line("custom driver config incomplete");
-        return "";
-    }
-    std::string full = c.dir + "/" + c.name;
-    log_line("custom driver source: " + full);
-    if (!is_regular_file(full)) {
-        log_line("custom driver source not found");
-        return "";
-    }
-    if (!ensure_dir(private_files_dir())) {
-        log_line("cannot create private files dir");
-        return "";
-    }
-    std::string dst = private_so_path();
-    if (!copy_file(full, dst)) {
-        log_line("copy custom driver failed");
-        return "";
-    }
-    log_line("custom driver copied to: " + dst);
+
+    log_ready(dst);
     return dst;
 }
-}
+
+}  // namespace custom_driver
